@@ -7,11 +7,14 @@
 #include <WiFiUdp.h>
 #include <Arduino.h>
 
-#define PORT 3000
+#define PORT 6060
+#define FREQ 2000
 #define LEFT_M0 13
 #define LEFT_M1 12
 #define RIGHT_M0 14
 #define RIGHT_M1 15
+
+#define MAXPAYLOADSIZE 1400
 
 #define UP 1
 #define DOWN 2
@@ -38,18 +41,23 @@
 #define HREF_GPIO_NUM 23
 #define PCLK_GPIO_NUM 22
 
-static WiFiClient client;
+#define SPEED 180
+
+#define WIFI_SSID    "PEDRO"
+#define WIFI_PSSWD   "cavalos123"
+
+typedef struct {
+  uint32_t totalBytes;     // Total size of the image in bytes
+  uint16_t packetNumber;   // The sequence number of the current packet
+  uint16_t totalPackets;   // The total number of packets for this image
+} __attribute__((packed)) ImageHeader;
+
 static WiFiUDP udpClient;
-const IPAddress ipServer(192, 168, 5, 20);  // Troca isso para o ip do servidor
-const char *ssid = "PEDRO";                  // Troque isso para o nome do Access Point
-const char *psswd = "cavalos123";            // Mesma coisa para senha
+static WiFiClient client;
+const IPAddress ipServer(192, 168, 5, 18);  // Troca isso para o ip do servidor
 const char idJSON[] = "{\"type\":\"register_car\",\"carId\":\"Mr.Car\"}";
 
 unsigned long previous_time;
-
-// Connection timeout constants
-const unsigned long WIFI_TIMEOUT = 20000;    // 20 seconds
-const unsigned long CLIENT_TIMEOUT = 10000;  // 10 seconds
 
 inline void cameraSetup() {
   camera_config_t config;
@@ -67,73 +75,48 @@ inline void cameraSetup() {
   config.pin_pclk = PCLK_GPIO_NUM;
   config.pin_vsync = VSYNC_GPIO_NUM;
   config.pin_href = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_QVGA;
-  config.jpeg_quality = 12;
+  config.jpeg_quality = 10;
   config.fb_count = 1;
   esp_camera_init(&config);
+
+  sensor_t *s = esp_camera_sensor_get();
+  if (s) {
+    s->set_vflip(s, 1);
+  }
 }
 
-inline void setupWifi() {
+inline void wifiSetup() {
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, psswd);
+  WiFi.begin(WIFI_SSID, WIFI_PSSWD);
 
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED) {
-    if (millis() - startTime > WIFI_TIMEOUT) {
-      Serial.println("WiFi connection timeout! Restarting...");
-      ESP.restart();
-    }
     delay(500);  // Reduced delay for faster response
     Serial.println("Tentando se conectar");
   }
-  Serial.println("WiFi conectado!");
   Serial.println(WiFi.localIP());
+
+  client.connect(ipServer, PORT);
+  client.write(idJSON, sizeof(idJSON) - 1);
 }
 
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);  // previne brownouts
   Serial.begin(115200);
-  Serial.println("Iniciando sistema...");
 
   // Setup robot hardware first
   robotSetup();
 
   cameraSetup();
 
-  setupWifi();
-
-  // Attempt TCP connection with timeout
-  unsigned long startTime = millis();
-  Serial.println("Me conectando");
-  while (!client.connected()) {
-    if (millis() - startTime > CLIENT_TIMEOUT) {
-      Serial.println("TCP connection timeout!");
-      break;
-    }
-    /*Serial.println("Tentando conectar ao servidor TCP...");
-    if (client.connect(ipServer, PORT)) {
-      Serial.println("Conectado ao servidor TCP!");
-      client.write(idJSON, sizeof(idJSON) - 1);
-      break;
-    }*/
-    }
-    delay(1000);
-    client.flush();
-
-  
-
-  // Setup UDP (this should not block indefinitely)
-  if (udpClient.begin(PORT)) {
-    Serial.println("UDP client iniciado com sucesso");
-  } else {
-    Serial.println("Falha ao iniciar UDP client");
-  }
+  wifiSetup();
 
   Serial.println("Setup completo!");
 }
@@ -142,14 +125,15 @@ void loop() {
   // Check WiFi connection
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi desconectado, reconectando...");
-    setupWifi();
+    wifiSetup();
   }
 
   // Check TCP connection and reconnect if needed
-  if (!client.connected()) {
+  /*if (!client.connected()) {
     Serial.println("Reconectando ao servidor...");
     if (client.connect(ipServer, PORT)) {
       client.flush();
+      client.write(idJSON, sizeof(idJSON) - 1);
     }
   }
 
@@ -165,7 +149,7 @@ void loop() {
         break;
       case DOWN:
         Serial.println("#DOWN");
-        robotBack();
+        robotStop();
         break;
       case RIGHT:
         Serial.println("#RIGHT");
@@ -179,97 +163,100 @@ void loop() {
         robotStop();
         break;
     }
-
-    robotStop();
     client.flush();
-  }
+  }*/
 
   sendCameraToServer();
-
-  // Add a small delay to prevent watchdog issues
-  delay(1000);
 }
 
 inline void robotSetup() {
-  Serial.println("Configurando robot...");
 
   // Pins for Motor Controller
-  pinMode(LEFT_M0, OUTPUT);
-  pinMode(LEFT_M1, OUTPUT);
-  pinMode(RIGHT_M0, OUTPUT);
-  pinMode(RIGHT_M1, OUTPUT);
+  /*ledcSetup(3, 2000, 8); 2000 hz PWM, 8-bit resolution and range from 0 to 255 
+  ledcSetup(4, 2000, 8); /* 2000 hz PWM, 8-bit resolution and range from 0 to 255 
+  ledcSetup(5, 2000, 8); /* 2000 hz PWM, 8-bit resolution and range from 0 to 255 
+  ledcSetup(6, 2000, 8); /* 2000 hz PWM, 8-bit resolution and range from 0 to 255 */
+  ledcAttachChannel(RIGHT_M0, FREQ, 8, 3);
+  ledcAttachChannel(RIGHT_M1, FREQ, 8, 4);
+  ledcAttachChannel(LEFT_M0, FREQ, 8, 5);
+  ledcAttachChannel(LEFT_M1, FREQ, 8, 6);
+
   pinMode(33, OUTPUT);
-
-  // Setup PWM channels with proper pin assignments
-  ledcSetup(3, 2000, 8); /* 2000 hz PWM, 8-bit resolution */
-  ledcSetup(4, 2000, 8);
-  ledcSetup(5, 2000, 8);
-  ledcSetup(6, 2000, 8);
-
-  // Attach pins to PWM channels
-  ledcAttachPin(RIGHT_M0, 3);  // Pin 14 to channel 3
-  ledcAttachPin(RIGHT_M1, 4);  // Pin 15 to channel 4
-  ledcAttachPin(LEFT_M0, 5);   // Pin 13 to channel 5
-  ledcAttachPin(LEFT_M1, 6);   // Pin 12 to channel 6
 
   // Make sure we are stopped
   robotStop();
+
+  ledcWrite(8, SPEED);
 
   Serial.println("Robot configurado!");
 }
 
 inline void sendCameraToServer() {
   camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    esp_camera_fb_return(fb);
+    return;
+  }
 
-  udpClient.beginPacket(ipServer, PORT);
-  udpClient.write(fb->buf, fb->len);
-  udpClient.endPacket();
+  uint16_t totalPackets = ceil((double)fb->len / MAXPAYLOADSIZE);
+
+  for (int i = 0; i < totalPackets; i++) {
+    ImageHeader header;
+    header.totalBytes = fb->len;
+    header.packetNumber = i;
+    header.totalPackets = totalPackets;
+
+    // Calculate the size and position of the current data chunk
+    uint16_t offset = i * MAXPAYLOADSIZE;
+    uint16_t currentChunkSize = min(MAXPAYLOADSIZE, (int) fb->len - offset);
+
+    // Create a buffer that combines the header and the image chunk
+    uint8_t buffer[sizeof(ImageHeader) + currentChunkSize];
+    memcpy(buffer, &header, sizeof(ImageHeader));
+    memcpy(buffer + sizeof(ImageHeader), fb->buf + offset, currentChunkSize);
+
+    // Send the combined buffer
+    udpClient.beginPacket(ipServer, PORT);
+    udpClient.write(buffer, sizeof(ImageHeader) + currentChunkSize);
+    udpClient.endPacket();
+
+    delay(5); // Small delay to prevent network congestion
+  }
+  
   esp_camera_fb_return(fb);
 }
 
 void robotStop() {
-  ledcWrite(3, 0);  // RIGHT_M0
-  ledcWrite(4, 0);  // RIGHT_M1
-  ledcWrite(5, 0);  // LEFT_M0
-  ledcWrite(6, 0);  // LEFT_M1
+  ledcWrite(3, LOW);  // RIGHT_M0
+  ledcWrite(4, LOW);  // RIGHT_M1
+  ledcWrite(5, LOW);  // LEFT_M0
+  ledcWrite(6, LOW);  // LEFT_M1
 }
 
 void robotFwd() {
-  // Move forward: RIGHT_M1 and LEFT_M1 active
-  ledcWrite(3, 0);    // RIGHT_M0 off
-  ledcWrite(4, 150);  // RIGHT_M1 on (reduced speed for safety)
-  ledcWrite(5, 0);    // LEFT_M0 off
-  ledcWrite(6, 150);  // LEFT_M1 on
-
-  previous_time = millis();
+  ledcWrite(3, SPEED);
+  ledcWrite(4, 0);
+  ledcWrite(5, SPEED);
+  ledcWrite(6, 0);
 }
 
 void robotBack() {
-  // Move backward: RIGHT_M0 and LEFT_M0 active
-  ledcWrite(3, 150);  // RIGHT_M0 on
-  ledcWrite(4, 0);    // RIGHT_M1 off
-  ledcWrite(5, 150);  // LEFT_M0 on
-  ledcWrite(6, 0);    // LEFT_M1 off
-
-  previous_time = millis();
+  ledcWrite(3, 0);
+  ledcWrite(4, SPEED);
+  ledcWrite(5, 0);
+  ledcWrite(6, SPEED);
 }
 
 void robotRight() {
-  // Turn right: LEFT_M1 active, RIGHT_M0 active
-  ledcWrite(3, 150);  // RIGHT_M0 on (reverse right wheel)
-  ledcWrite(4, 0);    // RIGHT_M1 off
-  ledcWrite(5, 0);    // LEFT_M0 off
-  ledcWrite(6, 150);  // LEFT_M1 on (forward left wheel)
-
-  previous_time = millis();
+  ledcWrite(3, SPEED);
+  ledcWrite(4, 0);
+  ledcWrite(5, 0);
+  ledcWrite(6, SPEED);
 }
 
 void robotLeft() {
-  // Turn left: RIGHT_M1 active, LEFT_M0 active
-  ledcWrite(3, 0);    // RIGHT_M0 off
-  ledcWrite(4, 150);  // RIGHT_M1 on (forward right wheel)
-  ledcWrite(5, 150);  // LEFT_M0 on (reverse left wheel)
-  ledcWrite(6, 0);    // LEFT_M1 off
-
-  previous_time = millis();
+  ledcWrite(3, 0);
+  ledcWrite(4, SPEED);
+  ledcWrite(5, SPEED);
+  ledcWrite(6, 0);
 }
