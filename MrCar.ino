@@ -1,63 +1,123 @@
-#include "esp_wifi.h"
 #include "esp_camera.h"
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
-#include <esp32-hal-ledc.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
-#include <Arduino.h>
+#include <WebSocketsClient.h>
+#include <ArduinoJson.h>
+#include <cstdint>
+#include "camera_pins.h"
 
-#define PORT 6060
 #define FREQ 2000
 #define LEFT_M0 13
 #define LEFT_M1 12
 #define RIGHT_M0 14
 #define RIGHT_M1 15
 
-#define MAXPAYLOADSIZE 1400
-
-#define UP 1
-#define DOWN 2
-#define RIGHT 3
-#define LEFT 4
-#define STOP 5
-
-#define CAMERA_MODEL_AI_THINKER
-#define PWDN_GPIO_NUM 32
-#define RESET_GPIO_NUM -1
-#define XCLK_GPIO_NUM 0
-#define SIOD_GPIO_NUM 26
-#define SIOC_GPIO_NUM 27
-
-#define Y9_GPIO_NUM 35
-#define Y8_GPIO_NUM 34
-#define Y7_GPIO_NUM 39
-#define Y6_GPIO_NUM 36
-#define Y5_GPIO_NUM 21
-#define Y4_GPIO_NUM 19
-#define Y3_GPIO_NUM 18
-#define Y2_GPIO_NUM 5
-#define VSYNC_GPIO_NUM 25
-#define HREF_GPIO_NUM 23
-#define PCLK_GPIO_NUM 22
-
-#define SPEED 180
-
+/** Esses macros definem a configuração de qual rede, WiFi e porta será executado o WS
+*   Use 1 - para sua rede e/ou servidor seu
+*   Use 0 - para a rede e/ou servidor do Ricado 
+*/
+#if 1
 #define WIFI_SSID    "PEDRO"
 #define WIFI_PSSWD   "cavalos123"
+#else
+#define WIFI_SSID    "UENP-RACE"
+#define WIFI_PSSWD   "competidor"
+#endif
+#if 1
+#define WS_SERVER    "192.168.5.18"
+#define PORT         8080
+#else
+#define WS_SERVER    "uenp-race-de8caa13ef2a.herokuapp.com"
+#define PORT         80 //Após pedir ajuda para algumas ias aparentemente é necessário entrar na porta 80 (?). Não sei, se alguem souber compartilhe comigo
+#endif
+#define WS_PATH      "/ws"
 
-typedef struct {
-  uint32_t totalBytes;     // Total size of the image in bytes
-  uint16_t packetNumber;   // The sequence number of the current packet
-  uint16_t totalPackets;   // The total number of packets for this image
-} __attribute__((packed)) ImageHeader;
+WebSocketsClient webSocket;
+String carId = "Mr.Car";
+String json;
 
-static WiFiUDP udpClient;
-static WiFiClient client;
-const IPAddress ipServer(192, 168, 5, 18);  // Troca isso para o ip do servidor
-const char idJSON[] = "{\"type\":\"register_car\",\"carId\":\"Mr.Car\"}";
+using ArduinoJson::JsonDocument;
 
-unsigned long previous_time;
+void startCameraServer();
+
+/*
+* Função responszável por agrantir que o carrinho mova, altere isso caso use o servo
+*/
+void moveRobot(int16_t x, int16_t y);
+
+void handleEvent(WStype_t type, uint8_t * payload, size_t length) {
+  JsonDocument doc;
+  JsonDocument msg;
+  switch(type) {
+    case WStype_CONNECTED: {
+      String streamURL = "http://" + WiFi.localIP().toString() + ":81/stream";
+      doc["type"] = "register_car";
+      doc["carId"] = carId;
+      doc["streamUrl"] = streamURL;
+      serializeJson(doc, json);
+      webSocket.sendTXT(json.c_str());
+      break;
+    }
+    case WStype_TEXT: {
+      DeserializationError error = deserializeJson(msg, payload);
+      if (error) {
+        Serial.println("Erro ao interpretar JSON");
+        return;
+      }
+      
+      String msgType = msg["type"] | "";
+      if(msgType == "registered") {
+        Serial.println("Carro registrado!");
+        return;
+      }
+
+      if(msgType == "command") {
+        String cmd = msg["command"] | "";
+        Serial.println(cmd);
+        if(cmd == "forward") {
+          moveRobot(0, 180);
+          return;
+        }
+
+        if(cmd == "backward") {
+          moveRobot(0, -180);
+          return;
+        }
+
+        if(cmd == "left") {
+          moveRobot(180, 15);
+          return;
+        }
+
+        if(cmd == "right") {
+          moveRobot(180, 15);
+          return;
+        }
+
+        moveRobot(0, 0);
+        return;
+      }
+
+      if(msgType == "status") {
+        String status = msg["status"] | "";
+        Serial.println(status);
+        return;
+      }
+
+      if(msgType == "analog_command") {
+        int16_t x = (int16_t) (msg["x"] | 0.0)*255;
+        int16_t y = (int16_t) (msg["y"] | 0.0)*255;
+        moveRobot(x, y);
+        return;
+      }
+      String errMsg = msg["message"] | "Erro desconhecido";
+      Serial.println(errMsg);
+    }
+    default:
+    break;
+  }
+}
 
 inline void cameraSetup() {
   camera_config_t config;
@@ -82,8 +142,8 @@ inline void cameraSetup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_QVGA;
-  config.jpeg_quality = 10;
-  config.fb_count = 1;
+  config.jpeg_quality = 12;
+  config.fb_count = 2;
   esp_camera_init(&config);
 
   sensor_t *s = esp_camera_sensor_get();
@@ -93,18 +153,18 @@ inline void cameraSetup() {
 }
 
 inline void wifiSetup() {
-  WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PSSWD);
+  WiFi.setSleep(false);
 
-  unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);  // Reduced delay for faster response
-    Serial.println("Tentando se conectar");
   }
-  Serial.println(WiFi.localIP());
 
-  client.connect(ipServer, PORT);
-  client.write(idJSON, sizeof(idJSON) - 1);
+  startCameraServer();
+  Serial.printf("http://%s\n", WiFi.localIP().toString().c_str());
+  webSocket.begin(WS_SERVER, PORT, WS_PATH);
+  webSocket.onEvent(handleEvent);
+  webSocket.setReconnectInterval(5000);
 }
 
 void setup() {
@@ -117,146 +177,46 @@ void setup() {
   cameraSetup();
 
   wifiSetup();
-
-  Serial.println("Setup completo!");
 }
 
 void loop() {
-  // Check WiFi connection
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi desconectado, reconectando...");
-    wifiSetup();
-  }
+  webSocket.loop();
 
-  // Check TCP connection and reconnect if needed
-  /*if (!client.connected()) {
-    Serial.println("Reconectando ao servidor...");
-    if (client.connect(ipServer, PORT)) {
-      client.flush();
-      client.write(idJSON, sizeof(idJSON) - 1);
-    }
-  }
-
-  // Process incoming commands with non-blocking read
-  if (client.connected() && client.available()) {
-    int command = client.read();
-    Serial.printf("Comando recebido: %d\n", command);
-
-    switch (command) {
-      case UP:
-        Serial.println("#UP");
-        robotFwd();
-        break;
-      case DOWN:
-        Serial.println("#DOWN");
-        robotStop();
-        break;
-      case RIGHT:
-        Serial.println("#RIGHT");
-        robotRight();
-        break;
-      case LEFT:
-        Serial.println("#LEFT");
-        robotLeft();
-        break;
-      default:
-        robotStop();
-        break;
-    }
-    client.flush();
-  }*/
-
-  sendCameraToServer();
+  delay(1);
 }
 
-inline void robotSetup() {
 
+/** Função responsávle por informar os pinos necessários para o carrinho andar, ajuste essa função também no caso de ter um servo motor
+* 
+*/
+inline void robotSetup() {
   // Pins for Motor Controller
-  /*ledcSetup(3, 2000, 8); 2000 hz PWM, 8-bit resolution and range from 0 to 255 
-  ledcSetup(4, 2000, 8); /* 2000 hz PWM, 8-bit resolution and range from 0 to 255 
-  ledcSetup(5, 2000, 8); /* 2000 hz PWM, 8-bit resolution and range from 0 to 255 
-  ledcSetup(6, 2000, 8); /* 2000 hz PWM, 8-bit resolution and range from 0 to 255 */
-  ledcAttachChannel(RIGHT_M0, FREQ, 8, 3);
-  ledcAttachChannel(RIGHT_M1, FREQ, 8, 4);
-  ledcAttachChannel(LEFT_M0, FREQ, 8, 5);
-  ledcAttachChannel(LEFT_M1, FREQ, 8, 6);
+  ledcAttach(RIGHT_M0, FREQ, 8);
+  ledcAttach(RIGHT_M1, FREQ, 8);
+  ledcAttach(LEFT_M0, FREQ, 8);
+  ledcAttach(LEFT_M1, FREQ, 8);
 
   pinMode(33, OUTPUT);
 
   // Make sure we are stopped
-  robotStop();
+  moveRobot(0, 0);
 
-  ledcWrite(8, SPEED);
-
-  Serial.println("Robot configurado!");
+  ledcWrite(8, 255);
 }
 
-inline void sendCameraToServer() {
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
-    esp_camera_fb_return(fb);
-    return;
-  }
+void moveRobot(int16_t speedX, int16_t speedY) {
+  int16_t rightSpeed = speedY - speedX;
+  uint8_t rightPlus  = static_cast<uint8_t>(max((int16_t) 0, rightSpeed));
+  uint8_t rightNeq   = static_cast<uint8_t>(max((int16_t) 0, (int16_t) -rightSpeed));
 
-  uint16_t totalPackets = ceil((double)fb->len / MAXPAYLOADSIZE);
+  int16_t leftSpeed  = speedY + speedX;
+  uint8_t leftPlus   = static_cast<uint8_t>(max((int16_t) 0, (int16_t) leftSpeed));
+  uint8_t leftNeq    = static_cast<uint8_t>(max((int16_t) 0, (int16_t) -leftSpeed));
 
-  for (int i = 0; i < totalPackets; i++) {
-    ImageHeader header;
-    header.totalBytes = fb->len;
-    header.packetNumber = i;
-    header.totalPackets = totalPackets;
+  // Aplica PWM nos 2 motores
+  ledcWrite(RIGHT_M0, rightPlus);
+  ledcWrite(RIGHT_M1, rightNeq);
 
-    // Calculate the size and position of the current data chunk
-    uint16_t offset = i * MAXPAYLOADSIZE;
-    uint16_t currentChunkSize = min(MAXPAYLOADSIZE, (int) fb->len - offset);
-
-    // Create a buffer that combines the header and the image chunk
-    uint8_t buffer[sizeof(ImageHeader) + currentChunkSize];
-    memcpy(buffer, &header, sizeof(ImageHeader));
-    memcpy(buffer + sizeof(ImageHeader), fb->buf + offset, currentChunkSize);
-
-    // Send the combined buffer
-    udpClient.beginPacket(ipServer, PORT);
-    udpClient.write(buffer, sizeof(ImageHeader) + currentChunkSize);
-    udpClient.endPacket();
-
-    delay(5); // Small delay to prevent network congestion
-  }
-  
-  esp_camera_fb_return(fb);
-}
-
-void robotStop() {
-  ledcWrite(3, LOW);  // RIGHT_M0
-  ledcWrite(4, LOW);  // RIGHT_M1
-  ledcWrite(5, LOW);  // LEFT_M0
-  ledcWrite(6, LOW);  // LEFT_M1
-}
-
-void robotFwd() {
-  ledcWrite(3, SPEED);
-  ledcWrite(4, 0);
-  ledcWrite(5, SPEED);
-  ledcWrite(6, 0);
-}
-
-void robotBack() {
-  ledcWrite(3, 0);
-  ledcWrite(4, SPEED);
-  ledcWrite(5, 0);
-  ledcWrite(6, SPEED);
-}
-
-void robotRight() {
-  ledcWrite(3, SPEED);
-  ledcWrite(4, 0);
-  ledcWrite(5, 0);
-  ledcWrite(6, SPEED);
-}
-
-void robotLeft() {
-  ledcWrite(3, 0);
-  ledcWrite(4, SPEED);
-  ledcWrite(5, SPEED);
-  ledcWrite(6, 0);
+  ledcWrite(LEFT_M0,  leftPlus);
+  ledcWrite(LEFT_M1,  leftNeq);
 }
