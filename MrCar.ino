@@ -36,88 +36,11 @@
 WebSocketsClient webSocket;
 String carId = "Mr.Car";
 String json;
+int16_t olderSpeedX = 0;
 
 using ArduinoJson::JsonDocument;
 
 void startCameraServer();
-
-/*
-* Função responszável por agrantir que o carrinho mova, altere isso caso use o servo
-*/
-void moveRobot(int16_t x, int16_t y);
-
-void handleEvent(WStype_t type, uint8_t * payload, size_t length) {
-  JsonDocument doc;
-  JsonDocument msg;
-  switch(type) {
-    case WStype_CONNECTED: {
-      String streamURL = "http://" + WiFi.localIP().toString() + ":81/stream";
-      doc["type"] = "register_car";
-      doc["carId"] = carId;
-      doc["streamUrl"] = streamURL;
-      serializeJson(doc, json);
-      webSocket.sendTXT(json.c_str());
-      break;
-    }
-    case WStype_TEXT: {
-      DeserializationError error = deserializeJson(msg, payload);
-      if (error) {
-        Serial.println("Erro ao interpretar JSON");
-        return;
-      }
-      
-      String msgType = msg["type"] | "";
-      if(msgType == "registered") {
-        Serial.println("Carro registrado!");
-        return;
-      }
-
-      if(msgType == "command") {
-        String cmd = msg["command"] | "";
-        Serial.println(cmd);
-        if(cmd == "forward") {
-          moveRobot(0, 180);
-          return;
-        }
-
-        if(cmd == "backward") {
-          moveRobot(0, -180);
-          return;
-        }
-
-        if(cmd == "left") {
-          moveRobot(180, 15);
-          return;
-        }
-
-        if(cmd == "right") {
-          moveRobot(180, 15);
-          return;
-        }
-
-        moveRobot(0, 0);
-        return;
-      }
-
-      if(msgType == "status") {
-        String status = msg["status"] | "";
-        Serial.println(status);
-        return;
-      }
-
-      if(msgType == "analog_command") {
-        int16_t x = (int16_t) (msg["x"] | 0.0)*255;
-        int16_t y = (int16_t) (msg["y"] | 0.0)*255;
-        moveRobot(x, y);
-        return;
-      }
-      String errMsg = msg["message"] | "Erro desconhecido";
-      Serial.println(errMsg);
-    }
-    default:
-    break;
-  }
-}
 
 inline void cameraSetup() {
   camera_config_t config;
@@ -219,4 +142,86 @@ void moveRobot(int16_t speedX, int16_t speedY) {
 
   ledcWrite(LEFT_M0,  leftPlus);
   ledcWrite(LEFT_M1,  leftNeq);
+}
+
+/*
+* Função responszável por agrantir que o carrinho mova, altere isso caso use o servo
+*/
+void handleEvent(WStype_t type, uint8_t * payload, size_t length) {
+  JsonDocument doc;
+  JsonDocument msg;
+  switch(type) {
+    case WStype_CONNECTED: {
+      String streamURL = "http://" + WiFi.localIP().toString() + ":81/stream";
+      doc["type"] = "register_car";
+      doc["carId"] = carId;
+      doc["streamUrl"] = streamURL;
+      serializeJson(doc, json);
+      webSocket.sendTXT(json.c_str());
+      break;
+    }
+    case WStype_TEXT: {
+      DeserializationError error = deserializeJson(msg, payload);
+      if (error) {
+        Serial.println("Erro ao interpretar JSON");
+        return;
+      }
+      
+      String msgType = msg["type"] | "";
+      if(msgType == "registered") {
+        Serial.println("Carro registrado!");
+        return;
+      }
+
+      if(msgType == "command") {
+        String cmd = msg["command"] | "";
+        Serial.println(cmd);
+        if(cmd == "forward") {
+          olderSpeedX = 15;
+          moveRobot(0, 180);
+          return;
+        }
+
+        if(cmd == "backward") {
+          olderSpeedX = -15;
+          moveRobot(0, -180);
+          return;
+        }
+
+        if(cmd == "left") {
+          moveRobot(180, olderSpeedX);
+          delay(30);
+          moveRobot(0, olderSpeedX);
+          return;
+        }
+
+        if(cmd == "right") {
+          moveRobot(-180, olderSpeedX);
+          delay(30);
+          moveRobot(0, olderSpeedX);
+          return;
+        }
+
+        moveRobot(0, 0);
+        return;
+      }
+
+      if(msgType == "status") {
+        String status = msg["status"] | "";
+        Serial.println(status);
+        return;
+      }
+
+      if(msgType == "analog_command") {
+        int16_t x = (int16_t) (msg["x"] | 0.0)*255;
+        int16_t y = (int16_t) (msg["y"] | 0.0)*255;
+        moveRobot(x, y);
+        return;
+      }
+      String errMsg = msg["message"] | "Erro desconhecido";
+      Serial.println(errMsg);
+    }
+    default:
+    break;
+  }
 }
